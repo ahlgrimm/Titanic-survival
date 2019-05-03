@@ -1,0 +1,299 @@
+---
+title: "Titanic survival"
+author: "Marius Ahlgrimm"
+date: "1 April 2019"
+output:
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r}
+# loading libraries
+library(readxl)
+library(tidyverse)
+library(magrittr)
+library(tibble)
+library(e1071)
+library(randomForest)
+library(caret)
+library(FNN)
+library(kableExtra)
+```
+
+```{r}
+titanic = read_excel("titanic3.xlsx")
+summary(titanic)
+```
+
+```{r}
+# Modifying data
+
+## Create factor variables
+titanic$sex = as.factor(titanic$sex)
+titanic$pclass = as.factor(as.character(titanic$pclass))
+titanic$survived = as.factor(as.character(titanic$survived))
+titanic$embarked = as.factor(titanic$embarked)
+
+## Name into numerical value
+id_miss = grep("[[:punct:]][[:space:]]Miss[[:punct:]]",titanic$name)
+id_mrs = grep("[[:punct:]][[:space:]]Mrs[[:punct:]]",titanic$name)
+id_mr = grep("[[:punct:]][[:space:]]Mr[[:punct:]]",titanic$name)
+
+titanic[id_miss,'Title'] = 1
+titanic[id_mrs,'Title'] = 2
+titanic[id_mr,'Title'] = 3
+titanic[-c(id_mr,id_miss,id_mrs),'Title'] = 4
+
+## Create variable family_size
+
+titanic$family_size = titanic$parch + titanic$sibsp + 1 
+
+## number of NAs in each column
+NAs = colSums(is.na(titanic))
+NAs
+  
+## Drop cabin, boat, body and home.dest (too many NAs) use Title instead of name
+titanic_reduced = titanic[,c(1,4,5,6,7,9,11,15,16,2)]
+
+## random forest impute
+rf_impute = rfImpute(survived~.,data=titanic_reduced)
+
+
+
+```
+
+```{r}
+## Equal amount of people who survived in train and test set
+set.seed(234)
+survivors =  which(rf_impute$survived == 1)
+non_survivors = which(rf_impute$survived == 0)
+train_id = c(sample(survivors, size = trunc(0.80 * length(survivors))),sample(non_survivors, size = trunc(0.80 * length(non_survivors))))
+train = rf_impute[train_id, ]
+test = rf_impute[-train_id, ]
+```
+
+
+```{r}
+# survival by sex
+train %>%
+  group_by(survived, sex) %>%
+  summarize(n = n())
+
+train %>%
+  group_by(sex) %>%
+  summarize(n = n(),
+            perc.surv = sum(survived == 1) / n)
+
+# survival by pclass
+train %>%
+  group_by(survived, pclass) %>%
+  summarize(n = n())
+
+train %>%
+  group_by(pclass) %>%
+  summarize(n = n(),
+            perc.surv = sum(survived == 1) / n)
+
+# survival by embarked
+train %>%
+  group_by(survived, embarked) %>%
+  summarize(n = n())
+
+train %>%
+  group_by(embarked) %>%
+  summarize(n = n(),
+            perc.surv = sum(survived == 1) / n)
+
+# survival by Title
+train %>%
+  group_by(survived, Title) %>%
+  summarize(n = n())
+
+train %>%
+  group_by(Title) %>%
+  summarize(n = n(),
+            perc.surv = sum(survived == 1) / n)
+
+# survival by age
+ggplot(train) +
+  geom_boxplot(mapping = aes(x = survived, y = age))
+
+# survial by sibsp
+ggplot(train) +
+  geom_boxplot(mapping = aes(x = survived, y = sibsp))
+
+# survial by parch
+ggplot(train) +
+  geom_boxplot(mapping = aes(x = survived, y = parch))
+
+# survival by fare
+ggplot(train) +
+  geom_boxplot(mapping = aes(x = survived, y = fare))
+
+# survial by family_size
+ggplot(train) +
+  geom_boxplot(mapping = aes(x = survived, y = family_size))
+
+# correlation plot to demonstrate lack of correlation between numerical variables
+train %>%
+  filter(survived == "1") %>%
+  select_if(is.numeric) %>%
+  cor() %>%
+  corrplot::corrplot()
+
+# density plots for numeric variables to show non-normality
+train %>%
+  select(age, sibsp, parch, fare, family_size) %>%
+  gather(metric, value) %>%
+  ggplot(aes(value, fill = metric)) +
+    geom_density(show.legend = FALSE) +
+    facet_wrap(~ metric, scales = "free")
+
+```
+
+```{r}
+set.seed(234)
+
+rf = randomForest(survived ~., data=train, mtry=3, importance=TRUE, ntree=10000)
+varImpPlot(rf)
+
+trainPred_rf = predict(rf,train,type="class")
+train_err_rf = 1 - sum(diag(table(trainPred_rf, train$survived)))/sum(table(trainPred_rf, train$survived))
+testPred_rf = predict(rf,test,type="class")
+test_err_rf = 1 - sum(diag(table(testPred_rf, test$survived)))/sum(table(testPred_rf, test$survived))
+
+```
+
+```{r}
+set.seed(234)
+svm_lin = tune(svm, survived~., data = train,
+kernel = "linear",
+ranges = list(cost = seq(0.05,10,0.5)))
+
+svm_pol = tune(svm, survived~., data = train,
+kernel = "polynomial",
+ranges = list(cost = seq(0.05,10,0.5), degree = 1:4))
+
+svm_rad = tune(svm, survived~., data = train,
+kernel = "radial",
+ranges = list(cost = seq(0.05,10,0.5)))
+
+
+testPred_lin = predict(svm_lin$best.model, test)
+trainPred_lin = predict(svm_lin$best.model, train)
+train_err_lin = 1 - sum(diag(table(trainPred_lin, train$survived)))/sum(table(trainPred_lin, train$survived))
+cv_err_lin = min(svm_lin$performances$error)
+test_err_lin = 1 - sum(diag(table(testPred_lin, test$survived)))/sum(table(testPred_lin, test$survived))
+
+testPred_pol = predict(svm_pol$best.model, test)
+trainPred_pol = predict(svm_pol$best.model, train)
+train_err_pol = 1 - sum(diag(table(trainPred_pol, train$survived)))/sum(table(trainPred_pol, train$survived))
+cv_err_pol = min(svm_pol$performances$error)
+test_err_pol = 1 - sum(diag(table(testPred_pol, test$survived)))/sum(table(testPred_pol, test$survived))
+
+testPred_rad= predict(svm_rad$best.model, test)
+trainPred_rad = predict(svm_rad$best.model, train)
+train_err_rad = 1 - sum(diag(table(trainPred_rad, train$survived)))/sum(table(trainPred_rad, train$survived))
+cv_err_rad = min(svm_rad$performances$error)
+test_err_rad = 1 - sum(diag(table(testPred_rad, test$survived)))/sum(table(testPred_rad, test$survived))
+
+kable(data.frame(Linear = c(train_err_lin, cv_err_lin, test_err_lin),
+Polynomial = c(train_err_pol, cv_err_pol, test_err_pol),
+Radial = c(train_err_rad, cv_err_rad, test_err_rad),
+row.names = c('Train','CV', 'Test')))
+```
+
+```{r}
+set.seed(234)
+train_err = c()
+test_err = c()
+grid = seq(0.05,10,0.5)
+for (i in seq(1,length(grid))) {
+  svmfit = svm(survived~.,data=train,cost = grid[i], gamma = svm_rad$best.model$gamma,kernel="radial")
+  
+  pred_svm_train = predict(svmfit, newdata=train)
+  tab = table(pred_svm_train, as.factor(train$survived))
+  train_err[i] = 1 - sum(diag(tab))/sum(tab)
+  
+  pred_svm_test = predict(svmfit, newdata=test)
+  tab = table(pred_svm_test, as.factor(test$survived))
+  test_err[i] = 1 - sum(diag(tab))/sum(tab)
+}
+
+with(svm_rad$performances, plot(error ~ cost, type = "o", pch = 20, xlab = "cost", ylim = c(0, max(test_err) + .05),main="Radial model errors as function of cost"))
+lines(grid,train_err, type = 'o', pch=20,col = "blue",ylim= c(0,0.5))
+lines(grid,test_err, type = 'o', pch = 20, col="red")
+legend("bottom", legend = c("train error", "cv error", "test error"), col = c("blue", "black", "red"), lty=1)
+```
+
+
+```{r}
+set.seed(234)
+
+mean_train =colMeans(train[,c(4,5,6,7,9,10)])
+std_train =sqrt(diag(var(train[,c(4,5,6,7,9,10)])))
+
+X_train =scale(train[,c(4,5,6,7,9,10)], center = mean_train , scale = std_train)
+y_train = train$survived
+X_test =scale(test[,c(4,5,6,7,9,10)], center = mean_train, scale = std_train)
+y_test = test$survived
+
+train_control=trainControl(method="cv", number=5)
+
+k_range =data.frame(k =seq(1,100))
+
+res_CV_KNN =train(survived~.,
+                   method = "knn",
+                   tuneGrid = k_range,
+                   trControl = train_control,
+                   metric = "Accuracy",
+                   data = train)
+
+res_knn_train = knn(train = X_train, test = X_train,cl = y_train, k = res_CV_KNN$bestTune[[1]])
+res_knn_test = knn(train = X_train, test = X_test,cl = y_train, k = res_CV_KNN$bestTune[[1]])
+
+
+train_err_knn = mean(res_knn_train != train$survived)
+test_err_knn = mean(res_knn_test != test$survived)
+cv_err_knn = 1-max(res_CV_KNN$results$Accuracy)
+
+```
+```{r}
+set.seed(234)
+k_range = seq(1,100) 
+train_err_vec = rep(NA,100) 
+test_err_vec = rep(NA,100) 
+for( j in 1:100){
+knn_fit = knn(train = X_train, test = X_train,cl = y_train, k = k_range[j])
+train_err_vec[j] = mean(knn_fit != train$survived)
+
+knn_fit = knn(train = X_train, test = X_test,cl = y_train, k = k_range[j])
+test_err_vec[j] = mean(knn_fit != test$survived)
+}
+
+lower = min( c(test_err_vec, train_err_vec,1-res_CV_KNN$results$Accuracy) )
+upper = max( c(test_err_vec, train_err_vec,1-res_CV_KNN$results$Accuracy) )
+
+plot(1/k_range, train_err_vec, type = "l", col = "blue",
+xlab = "1/K ", ylab = "Errors",
+ylim = c(lower, upper), log = 'x',
+main = "KNN errors as function of 1/k neighbors")
+lines(1/k_range, test_err_vec, type = "l", col = "red")
+lines(1/k_range,1-res_CV_KNN$results$Accuracy, type="l", col="black")
+
+legend("bottomleft", legend = c("training error", "test error", "cv error"),
+col = c("blue", "red",'black'), lty = c(1, 1, 1))
+```
+
+
+```{r}
+kable(data.frame(RF = c(round(train_err_rf,7), "", round(test_err_rf,7)),
+SVM = c(train_err_rad, cv_err_rad, test_err_rad),
+KNN = c(train_err_knn, cv_err_knn, test_err_knn),
+row.names = c('Train','CV', 'Test')))
+```
+
+
+
